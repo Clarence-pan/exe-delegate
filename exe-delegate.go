@@ -8,6 +8,7 @@ import "encoding/json"
 import "fmt"
 import "io"
 import "strings"
+import "syscall"
 
 // Executable to be executed
 type Executable struct {
@@ -38,12 +39,14 @@ func init() {
 }
 
 func main() {
+	var err error
+
 	args := os.Args
 
 	args = enableDebugModeIfNeeded(args)
 
-	exe := tryParseMetaFromOsExe(args)
-	debugf("try parsed exe: %v", exe)
+	exe := tryParseMetaFromOsExe(thisExeFilePath)
+	debugf("parsed exe: %v", exe)
 
 	if exe != nil {
 		exe.exec(args[1:])
@@ -55,7 +58,8 @@ func main() {
 		return
 	}
 
-	if args[1] == "-o" {
+	// generate delegate
+	if args[1] == "-o" || args[1] == "--output" {
 		if len(args) < 4 {
 			printHelp()
 			return
@@ -66,6 +70,49 @@ func main() {
 			Version: "1.0",
 			Command: args[3:],
 		})
+		return
+	}
+
+	// parse delegate
+	if args[1] == "-p" || args[1] == "--parse" {
+		if len(args) != 3 {
+			printHelp()
+			return
+		}
+
+		exe, err = parseMetaFromOsExe(args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to parse `%v`. Detail: %v", args[2], err)
+			os.Exit(1)
+			return
+		}
+
+		jsonText, err := json.MarshalIndent(exe, "", " ")
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println(string(jsonText))
+
+		return
+	}
+
+	// update delegate
+	if args[1] == "-u" || args[1] == "--update" {
+		if len(args) != 3 {
+			printHelp()
+			return
+		}
+
+		exe, err = parseMetaFromOsExe(args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to parse `%v`. Detail: %v", args[2], err)
+			os.Exit(1)
+			return
+		}
+
+		generateExeTo(args[2], exe)
+
 		return
 	}
 
@@ -104,20 +151,24 @@ func (exe *Executable) exec(extraArgs []string) *os.ProcessState {
 
 	// log.Printf("Command finished with error: %v", err)
 	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// This program has exited with exit code != 0
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+				os.Exit(status.ExitStatus())
+			}
+		}
+
 		panic(err)
-		return nil
 	}
 
 	return cmd.ProcessState
 }
 
-func tryParseMetaFromOsExe(args []string) *Executable {
-	debugf("args: %v", args)
-
-	file, err := os.OpenFile(thisExeFilePath, os.O_RDONLY, 0755)
+func parseMetaFromOsExe(exeFilePath string) (*Executable, error) {
+	file, err := os.OpenFile(exeFilePath, os.O_RDONLY, 0755)
 	if err != nil {
 		debugf("Failed to open exe file: %v", err)
-		return nil
+		return nil, err
 	}
 
 	defer file.Close()
@@ -128,7 +179,7 @@ func tryParseMetaFromOsExe(args []string) *Executable {
 	readBytes, err := file.Read(buf)
 	if err != nil {
 		debugf("Failed to read exe file: %v", err)
-		return nil
+		return nil, err
 	}
 
 	debugf("readBytes: %v", readBytes)
@@ -150,19 +201,33 @@ func tryParseMetaFromOsExe(args []string) *Executable {
 	err = json.Unmarshal(meta, &exe)
 	if err != nil {
 		debugf("Failed to parse JSON: %v", err)
+		return nil, err
+	}
+
+	return &exe, nil
+
+}
+
+func tryParseMetaFromOsExe(exeFilePath string) *Executable {
+	exe, err := parseMetaFromOsExe(exeFilePath)
+	if err != nil {
 		return nil
 	}
 
-	if &exe == nil {
-		debugf("What? Exe is nil!")
-		return nil
-	}
-
-	return &exe
+	return exe
 }
 
 func printHelp() {
-	fmt.Println("Usage: exe-delegate -o <delegate-exe-file> <original-exe-file-path> [...args]")
+	fmt.Println(`Usages:
+exe-delegate -o <delegate-exe-file> <original-exe-file-path> [...args]
+	- generate delegate file.
+
+exe-delegate -p <delegate-exe-file>
+	- parse a delegate file, and print the meta data in JSON format.
+
+exe-delegate -u <delegate-exe-file>
+	- update the delegate file with current exe file.
+`)
 	os.Exit(1)
 }
 
